@@ -1,0 +1,128 @@
+name: 'Push NuGet Package'
+description: 'Composite action to build and push a NuGet package for a .NET project.'
+
+inputs:
+  project-path:
+    description: 'Path to the .csproj file or project directory'
+    required: true
+  nuget-api-key:
+    description: 'NuGet API key for authentication'
+    required: true
+  nuget-source:
+    description: 'NuGet source URL (default: https://api.nuget.org/v3/index.json)'
+    required: false
+    default: 'https://api.nuget.org/v3/index.json'
+  dotnet-version:
+    description: 'Version of .NET to use'
+    required: false
+    default: '9.0.x'
+  configuration:
+    description: 'Build configuration (default: Release)'
+    required: false
+    default: 'Release'
+  skip-duplicate:
+    description: 'Skip pushing if package version already exists'
+    required: false
+    default: 'true'
+  include-symbols:
+    description: 'Include symbol packages'
+    required: false
+    default: 'true'
+
+outputs:
+  package-version:
+    description: 'Version of the package that was built'
+    value: ${{ steps.get_version.outputs.VERSION }}
+  package-path:
+    description: 'Path to the generated package file'
+    value: ${{ steps.build.outputs.package-path }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout the repository
+      uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ inputs.dotnet-version }}
+
+    - name: Get package version
+      id: get_version
+      run: |
+        # Extract version from project file
+        if [ -f "${{ inputs.project-path }}" ]; then
+          PROJECT_FILE="${{ inputs.project-path }}"
+        else
+          PROJECT_FILE="${{ inputs.project-path }}/*.csproj"
+        fi
+        
+        VERSION=$(grep '<Version>' $PROJECT_FILE | head -1 | cut -f 2 -d '>' | cut -f 1 -d '<')
+        if [ -z "$VERSION" ]; then
+          VERSION=$(grep '<PackageVersion>' $PROJECT_FILE | head -1 | cut -f 2 -d '>' | cut -f 1 -d '<')
+        fi
+        if [ -z "$VERSION" ]; then
+          VERSION="1.0.0"
+          echo "Warning: No version found in project file, using default: $VERSION"
+        fi
+        
+        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+        echo "Package version: $VERSION"
+      shell: bash
+
+    - name: Restore dependencies
+      run: dotnet restore ${{ inputs.project-path }}
+      shell: bash
+
+    - name: Build and pack
+      id: build
+      run: |
+        # Build and create NuGet package
+        dotnet pack ${{ inputs.project-path }} \
+          --configuration ${{ inputs.configuration }} \
+          --no-restore \
+          --output ./packages \
+          $([ "${{ inputs.include-symbols }}" = "true" ] && echo "--include-symbols --include-source")
+        
+        # Find the generated package
+        PACKAGE_PATH=$(find ./packages -name "*.nupkg" ! -name "*.symbols.nupkg" | head -1)
+        echo "package-path=$PACKAGE_PATH" >> $GITHUB_OUTPUT
+        echo "Package created: $PACKAGE_PATH"
+        
+        # List all generated packages
+        echo "Generated packages:"
+        ls -la ./packages/
+      shell: bash
+
+    - name: Push to NuGet
+      run: |
+        PACKAGE_PATH="${{ steps.build.outputs.package-path }}"
+        
+        if [ ! -f "$PACKAGE_PATH" ]; then
+          echo "Error: Package file not found at $PACKAGE_PATH"
+          exit 1
+        fi
+        
+        echo "Pushing package: $PACKAGE_PATH"
+        
+        # Push the package
+        dotnet nuget push "$PACKAGE_PATH" \
+          --source ${{ inputs.nuget-source }} \
+          --api-key ${{ inputs.nuget-api-key }} \
+          $([ "${{ inputs.skip-duplicate }}" = "true" ] && echo "--skip-duplicate")
+        
+        # Push symbols package if it exists and include-symbols is true
+        if [ "${{ inputs.include-symbols }}" = "true" ]; then
+          SYMBOLS_PACKAGE=$(echo "$PACKAGE_PATH" | sed 's/\.nupkg$/.symbols.nupkg/')
+          if [ -f "$SYMBOLS_PACKAGE" ]; then
+            echo "Pushing symbols package: $SYMBOLS_PACKAGE"
+            dotnet nuget push "$SYMBOLS_PACKAGE" \
+              --source ${{ inputs.nuget-source }} \
+              --api-key ${{ inputs.nuget-api-key }} \
+              $([ "${{ inputs.skip-duplicate }}" = "true" ] && echo "--skip-duplicate")
+          fi
+        fi
+        
+        echo "Package push completed successfully!"
+      shell: bash

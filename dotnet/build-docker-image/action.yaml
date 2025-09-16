@@ -1,0 +1,69 @@
+name: 'Build and Push Docker Image'
+description: 'Composite action to build and push a Docker image for a .NET project.'
+
+inputs:
+  version:
+    description: 'Version to tag the Docker image with (e.g., v1.0.0)'
+    required: true
+  docker-context:
+    description: 'Docker build context (default: src)'
+    required: false
+    default: 'src'
+  registry:
+    description: 'Container registry (default: ghcr.io)'
+    required: false
+    default: 'ghcr.io'
+  image-name:
+    description: 'Image name (default: github.repository)'
+    required: false
+    default: ''
+  platforms:
+    description: 'Target platforms for multi-platform builds'
+    required: false
+    default: 'linux/amd64'
+
+outputs:
+  image-digest:
+    description: 'Image digest of the built image'
+    value: ${{ steps.build_and_push.outputs.digest }}
+  image-tags:
+    description: 'Tags applied to the image'
+    value: ${{ steps.meta.outputs.tags }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout the repository
+      uses: actions/checkout@v4
+
+    - name: Extract metadata for Docker
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ inputs.registry }}/${{ inputs.image-name || github.repository }}
+        tags: |
+          type=semver,pattern={{version}},value=${{ inputs.version }}
+          type=semver,pattern={{major}}.{{minor}},value=${{ inputs.version }}
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to the Container registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ github.actor }}
+        password: ${{ env.GHCR_TOKEN }}
+
+    - name: Build and push
+      id: build_and_push
+      uses: docker/build-push-action@v5
+      with:
+        context: ${{ inputs.docker-context }}
+        push: true
+        platforms: ${{ inputs.platforms }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        annotations: ${{ steps.meta.outputs.annotations }}
+        cache-from: type=registry,ref=${{ inputs.registry }}/${{ inputs.image-name || github.repository }}:latest
+        cache-to: type=inline

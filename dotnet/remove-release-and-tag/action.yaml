@@ -1,0 +1,132 @@
+name: 'Remove Release and Tag'
+description: 'Composite action to remove a GitHub release and its associated tag for a .NET project.'
+
+inputs:
+  tag-name:
+    description: 'Name of the tag to remove (e.g., v1.0.0)'
+    required: true
+  release-id:
+    description: 'ID of the release to remove (optional - will be found by tag if not provided)'
+    required: false
+  github-token:
+    description: 'GitHub token with repo permissions'
+    required: true
+
+outputs:
+  tag-removed:
+    description: 'Whether the tag was successfully removed'
+    value: ${{ steps.remove_tag.outputs.tag_removed }}
+  release-removed:
+    description: 'Whether the release was successfully removed'
+    value: ${{ steps.remove_release.outputs.release_removed }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout the repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Validate tag exists
+      id: validate_tag
+      run: |
+        # Check if the tag exists
+        if git tag -l "${{ inputs.tag-name }}" | grep -q "${{ inputs.tag-name }}"; then
+          echo "tag_exists=true" >> $GITHUB_OUTPUT
+          echo "Tag ${{ inputs.tag-name }} found"
+        else
+          echo "tag_exists=false" >> $GITHUB_OUTPUT
+          echo "Warning: Tag ${{ inputs.tag-name }} not found"
+        fi
+      shell: bash
+
+    - name: Find release by tag
+      id: find_release
+      if: steps.validate_tag.outputs.tag_exists == 'true'
+      run: |
+        # Find the release ID by tag name if not provided
+        if [ -z "${{ inputs.release-id }}" ]; then
+          RELEASE_ID=$(curl -s \
+            -H "Authorization: token ${{ inputs.github-token }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "${{ github.api_url }}/repos/${{ github.repository }}/releases/tags/${{ inputs.tag-name }}" \
+            | jq -r '.id // empty')
+          
+          if [ -n "$RELEASE_ID" ] && [ "$RELEASE_ID" != "null" ]; then
+            echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
+            echo "release_found=true" >> $GITHUB_OUTPUT
+            echo "Found release with ID: $RELEASE_ID"
+          else
+            echo "release_found=false" >> $GITHUB_OUTPUT
+            echo "No release found for tag ${{ inputs.tag-name }}"
+          fi
+        else
+          echo "release_id=${{ inputs.release-id }}" >> $GITHUB_OUTPUT
+          echo "release_found=true" >> $GITHUB_OUTPUT
+          echo "Using provided release ID: ${{ inputs.release-id }}"
+        fi
+      shell: bash
+
+    - name: Remove GitHub Release
+      id: remove_release
+      if: steps.find_release.outputs.release_found == 'true'
+      run: |
+        # Remove the GitHub release
+        RELEASE_ID="${{ steps.find_release.outputs.release_id }}"
+        
+        RESPONSE=$(curl -s -w "%{http_code}" \
+          -X DELETE \
+          -H "Authorization: token ${{ inputs.github-token }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          "${{ github.api_url }}/repos/${{ github.repository }}/releases/$RELEASE_ID")
+        
+        HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+        
+        if [ "$HTTP_CODE" = "204" ]; then
+          echo "release_removed=true" >> $GITHUB_OUTPUT
+          echo "Successfully removed release with ID: $RELEASE_ID"
+        else
+          echo "release_removed=false" >> $GITHUB_OUTPUT
+          echo "Failed to remove release. HTTP code: $HTTP_CODE"
+          exit 1
+        fi
+      shell: bash
+
+    - name: Remove Git Tag (local and remote)
+      id: remove_tag
+      if: steps.validate_tag.outputs.tag_exists == 'true'
+      run: |
+        # Remove the tag locally and from remote
+        TAG_NAME="${{ inputs.tag-name }}"
+        
+        # Remove local tag
+        if git tag -d "$TAG_NAME"; then
+          echo "Local tag $TAG_NAME removed successfully"
+        else
+          echo "Failed to remove local tag $TAG_NAME"
+          echo "tag_removed=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+        
+        # Remove remote tag
+        if git push origin --delete "$TAG_NAME"; then
+          echo "Remote tag $TAG_NAME removed successfully"
+          echo "tag_removed=true" >> $GITHUB_OUTPUT
+        else
+          echo "Failed to remove remote tag $TAG_NAME"
+          echo "tag_removed=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+      shell: bash
+
+    - name: Summary
+      if: always()
+      run: |
+        echo "=== Removal Summary ==="
+        echo "Tag: ${{ inputs.tag-name }}"
+        echo "Tag existed: ${{ steps.validate_tag.outputs.tag_exists }}"
+        echo "Tag removed: ${{ steps.remove_tag.outputs.tag_removed }}"
+        echo "Release found: ${{ steps.find_release.outputs.release_found }}"
+        echo "Release removed: ${{ steps.remove_release.outputs.release_removed }}"
+      shell: bash

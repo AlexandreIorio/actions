@@ -1,0 +1,92 @@
+name: 'Tag and Release'
+description: 'Composite action to tag and create a GitHub release for a .NET project.'
+
+inputs:
+  version-file:
+    description: 'Path to the file containing the version (e.g., .csproj)'
+    required: true
+
+outputs:
+  tag-created:
+    description: 'Whether a new tag was created'
+    value: ${{ steps.create_tag.outputs.tag_created }}
+  version:
+    description: 'The version that was tagged'
+    value: ${{ steps.get_version.outputs.VERSION }}
+  version-simplified:
+    description: 'The simplified version (without v prefix)'
+    value: ${{ steps.get_version.outputs.VERSION_SIMPLIFIED }}
+  tag-name:
+    description: 'The tag name that was created (for use in removal if needed)'
+    value: ${{ steps.get_version.outputs.VERSION }}
+  release-id:
+    description: 'The ID of the created release (for use in removal if needed)'
+    value: ${{ steps.create_release.outputs.release_id }}
+  release-url:
+    description: 'The URL of the created release'
+    value: ${{ steps.create_release.outputs.html_url }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout the repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Get latest tag
+      id: get_latest_tag
+      run: |
+        # Get the latest tag, or the first commit if no tags exist
+        PREVIOUS_TAG=$(git describe --tags --abbrev=0 2>/dev/null || git rev-list --max-parents=0 HEAD)
+        echo "PREVIOUS_TAG=$PREVIOUS_TAG" >> $GITHUB_OUTPUT
+      shell: bash
+
+    - name: Get the current version
+      id: get_version
+      run: |
+        # Extract the version from the provided version file (e.g., .csproj)
+        VERSION_SIMPLIFIED=$(grep '<Version>' ${{ inputs.version-file }} | cut -f 2 -d '>' | cut -f 1 -d '<')
+        VERSION="v${VERSION_SIMPLIFIED}"
+        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+        echo "VERSION_SIMPLIFIED=$VERSION_SIMPLIFIED" >> $GITHUB_OUTPUT
+      shell: bash
+
+    - name: Create tag if new version
+      id: create_tag
+      run: |
+        # Create and push a new tag if the version has changed
+        if [ "${{ steps.get_version.outputs.VERSION }}" != "${{ steps.get_latest_tag.outputs.PREVIOUS_TAG }}" ]; then
+          git tag ${{ steps.get_version.outputs.VERSION }}
+          git push origin ${{ steps.get_version.outputs.VERSION }}
+          echo "tag_created=true" >> $GITHUB_OUTPUT
+        else
+          echo "tag_created=false" >> $GITHUB_OUTPUT
+        fi
+      shell: bash
+
+    - name: Generate changelog from commits
+      id: changelog
+      if: steps.create_tag.outputs.tag_created == 'true'
+      run: |
+        # Generate a changelog from commit messages between the previous tag and HEAD
+        PREVIOUS_TAG="${{ steps.get_latest_tag.outputs.PREVIOUS_TAG }}"
+        VERSION="${{ steps.get_version.outputs.VERSION }}"
+        # Create changelog and save to file
+        git log --pretty=format:'* %s (%h)' "${PREVIOUS_TAG}..HEAD" > changelog.txt
+        # Set output using step output syntax
+        echo "changelog-file=changelog.txt" >> $GITHUB_OUTPUT
+      shell: bash
+
+    - name: Create GitHub Release
+      id: create_release
+      if: steps.create_tag.outputs.tag_created == 'true'
+      uses: actions/create-release@v1
+      with:
+        tag_name: ${{ steps.get_version.outputs.VERSION }}
+        release_name: ${{ steps.get_version.outputs.VERSION }}
+        draft: false
+        body_path: ${{ steps.changelog.outputs.changelog-file }}
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ env.GITHUB_TOKEN }}
