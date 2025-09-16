@@ -30,9 +30,6 @@ inputs:
     default: 'true'
 
 outputs:
-  package-version:
-    description: 'Version of the package that was built'
-    value: ${{ steps.get_version.outputs.VERSION }}
   package-path:
     description: 'Path to the generated package file'
     value: ${{ steps.build.outputs.package-path }}
@@ -43,34 +40,45 @@ runs:
     - name: Checkout the repository
       uses: actions/checkout@v4
 
+    - name: Check .NET installation
+      id: check_dotnet
+      run: |
+        REQUIRED_VERSION="${{ inputs.dotnet-version }}"
+        echo "Required .NET version: $REQUIRED_VERSION"
+        
+        if command -v dotnet >/dev/null 2>&1 && dotnet --version >/dev/null 2>&1; then
+          CURRENT_VERSION=$(dotnet --version)
+          echo "Current .NET version: $CURRENT_VERSION"
+          
+          # Check if the required version matches (handle x patterns like 9.0.x)
+          if [[ "$REQUIRED_VERSION" == *".x" ]]; then
+            VERSION_PATTERN="${REQUIRED_VERSION%.x}"
+            if [[ "$CURRENT_VERSION" == "$VERSION_PATTERN"* ]]; then
+              echo ".NET version matches requirement ($CURRENT_VERSION)"
+              echo "skip_setup=true" >> $GITHUB_OUTPUT
+            else
+              echo "Version mismatch. Need: $REQUIRED_VERSION, Have: $CURRENT_VERSION"
+              echo "skip_setup=false" >> $GITHUB_OUTPUT
+            fi
+          elif [[ "$CURRENT_VERSION" == "$REQUIRED_VERSION" ]]; then
+            echo "Exact .NET version match ($CURRENT_VERSION)"
+            echo "skip_setup=true" >> $GITHUB_OUTPUT
+          else
+            echo "Version mismatch. Need: $REQUIRED_VERSION, Have: $CURRENT_VERSION"
+            echo "skip_setup=false" >> $GITHUB_OUTPUT
+          fi
+        else
+          echo "⚠️ .NET not found, will install"
+          echo "skip_setup=false" >> $GITHUB_OUTPUT
+        fi
+      shell: bash
+
     - name: Setup .NET
+      if: steps.check_dotnet.outputs.skip_setup != 'true'
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: ${{ inputs.dotnet-version }}
-
-    - name: Get package version
-      id: get_version
-      run: |
-        # Extract version from project file
-        if [ -f "${{ inputs.project-path }}" ]; then
-          PROJECT_FILE="${{ inputs.project-path }}"
-        else
-          PROJECT_FILE="${{ inputs.project-path }}/*.csproj"
-        fi
-        
-        VERSION=$(grep '<Version>' $PROJECT_FILE | head -1 | cut -f 2 -d '>' | cut -f 1 -d '<')
-        if [ -z "$VERSION" ]; then
-          VERSION=$(grep '<PackageVersion>' $PROJECT_FILE | head -1 | cut -f 2 -d '>' | cut -f 1 -d '<')
-        fi
-        if [ -z "$VERSION" ]; then
-          VERSION="1.0.0"
-          echo "Warning: No version found in project file, using default: $VERSION"
-        fi
-        
-        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-        echo "Package version: $VERSION"
-      shell: bash
-
+      
     - name: Restore dependencies
       run: dotnet restore ${{ inputs.project-path }}
       shell: bash
